@@ -1,20 +1,22 @@
-package Clinet
+package main
 
 import (
-	"../tools"
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
-	"io"
+	"github.com/lxn/walk"
+	. "github.com/lxn/walk/declarative"
 	"net"
-	"os"
-	"strconv"
-	"strings"
+	"time"
 )
 
+var serverAddress string = "localhost:8080" //服务器地址
+var clientAddress string = "localgost:8088" //c
 // Client is  connect
 type Client struct {
 	address string
@@ -24,210 +26,107 @@ type Client struct {
 	buf     []byte // 先定义一个buf
 }
 
-// Dial 创建新的Client和connect
-func Dial(address string) (*Client, error) {
+func main() {
+	var mainWindow *walk.MainWindow
+	var openFileDialog *walk.FileDialog
+	var userInfoEdit *walk.LineEdit
 
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		return nil, err
-	}
-	c := &Client{
-		address: address,
-		conn:    conn,
-		reader:  bufio.NewReaderSize(conn, 1024),
-		buf:     make([]byte, 64*1024),
-	}
-	c.welcome = c.readLine()
-	if c.welcome == "" {
-		conn.Close()
-		return nil, err
-	}
-	fmt.Println(c.welcome)
-	return c, nil
-}
+	openFileDialog = new(walk.FileDialog)
+	my_Client := new(Client)
+	my_Client.address = clientAddress
 
-// Put 上传文件
-// fn Progress callback
-func (c *Client) Put(name string, rser io.ReadSeeker, fn func(int) bool) int64 {
-	putCmd := fmt.Sprintf("PUT %s auto\r\n", name)
-	_, err := c.conn.Write([]byte(putCmd))
-	if err != nil {
-		fmt.Println("Put Write err:", err)
-		return -1
-	}
-
-	line := c.readLine()
-	if line == "" {
-		return -1
-	}
-
-	code, msg := parseCmd(line)
-	if code != 0 {
-		fmt.Printf("Put %s err:code-%d,msg-%s\r\n", name, code, msg)
-		return -1
-	}
-	seek, _ := strconv.ParseInt(msg, 10, 0)
-	if seek > 0 {
-		_, _ = rser.Seek(seek, io.SeekStart)
-	}
-
-	for {
-		rc, err := rser.Read(c.buf)
+	// 创建链接
+	go func() {
+		err := my_Client.newConnect(serverAddress)
 		if err != nil {
-			if err == io.EOF {
-				break
-			} else {
-				fmt.Print("rser Read Err:", err)
-				break
-			}
+			panic(err)
 		}
-		c.sendData(c.buf[:rc])
-		if fn != nil && !fn(rc) {
-			break
-		}
-	}
-	return c.endData()
+	}()
+	MainWindow{
+		AssignTo: &mainWindow,
+		Title:    "安全文件传输系统",
+		MinSize:  Size{Width: 300, Height: 200},
+		Layout:   VBox{},
+		Children: []Widget{
+			Label{
+				Text: "User Info:",
+			},
+			LineEdit{
+				AssignTo: &userInfoEdit,
+			},
+			PushButton{
+				Text: "提交证书申请，请输入你的姓名",
+				OnClicked: func() {
+					var ipSlice []net.IP
+					ipSlice = append(ipSlice, net.ParseIP(clientAddress))
+					my_Client.newConnect(serverAddress)
+					my_Client.SubmmitCsr(userInfoEdit.Text(), ipSlice) //提交证书申请
+					walk.MsgBox(mainWindow, "Success", "提交证书申请成功!", walk.MsgBoxIconInformation)
+
+				},
+			},
+			PushButton{
+				Text: "建立链接",
+				OnClicked: func() {
+					if _, err := openFileDialog.ShowOpen(mainWindow); err == nil {
+						if err != nil {
+							walk.MsgBox(mainWindow, "建立链接失败请检查延时或证书", err.Error(), walk.MsgBoxIconError)
+						} else {
+							walk.MsgBox(mainWindow, "Success", "建立长连接成功!", walk.MsgBoxIconInformation)
+						}
+					}
+				},
+			},
+			PushButton{
+				Text:      "发送文件",
+				OnClicked: nil,
+			},
+			PushButton{
+				Text:      "获取文件目录",
+				OnClicked: nil,
+			},
+			PushButton{
+				Text:      "获取文件",
+				OnClicked: nil,
+			},
+			PushButton{
+				Text:      "删除文件",
+				OnClicked: nil,
+			},
+		},
+	}.Run()
+
 }
 
-// Get 下载文件
-// fn Progress callback
-func (c *Client) Get(name string, wser io.WriteSeeker, fn func(int) bool) int64 {
-	var err error
-	// 移动到文件尾，获取 offset
-	offset, err := wser.Seek(0, io.SeekEnd)
-
-	putCmd := fmt.Sprintf("GET %s %d\r\n", name, offset)
-	_, err = c.conn.Write([]byte(putCmd))
+// newConnect 长链接
+func (c *Client) newConnect(serverAddress string) error {
+	// 与服务器建立 TCP 连接
+	conn, err := net.Dial("tcp", serverAddress)
 	if err != nil {
-		fmt.Println("Get Write err:", err)
-		return -1
+		return fmt.Errorf("unable to connect to server: %v", err)
 	}
-
-	line := c.readLine()
-	if line == "" {
-		return -1
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		fmt.Println("Connection is not a *net.TCPConn")
 	}
-
-	code, msg := parseCmd(line)
-	if code != 0 {
-		fmt.Printf("Get %s err:code-%d,msg-%s\r\n", name, code, msg)
-		return -1
+	// 设置 Keepalive
+	err = tcpConn.SetKeepAlive(true)
+	// 设置 Keepalive 时间间隔（可选）
+	err = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	if err != nil {
+		fmt.Println("Error setting Keepalive period:", err)
 	}
-	// 获取 服务器上 文件 大小
-	fsize, _ := strconv.ParseInt(msg, 10, 0)
-	fmt.Println("size:", fsize)
-
-	for {
-		rc := c.writeTo(wser)
-		if rc == -1 {
-			fmt.Print("c recvData -1")
-			break
-		} else if rc == 0 {
-			break
-		}
-		if fn != nil && !fn(rc) {
-			break
-		}
-	}
-	return c.endData()
+	c.conn = conn
+	return nil
 }
 
-func (c *Client) readLine() string {
-	line, err := c.reader.ReadString('\n')
-	if err != nil {
-		if io.EOF == err {
-			// 断开连接了
-			fmt.Println("readLine EOF")
-			return ""
-		}
-		if os.IsTimeout(err) {
-			fmt.Println("readLine timeout:", err)
-		} else {
-			fmt.Println("readLine other:", err)
-		}
-		return ""
-	}
-
-	return strings.Trim(line, "\r\n")
+// sendFile 发送文件
+func (c *Client) sendFile(serverAddress, filePath string) error {
+	return nil
 }
 
-func (c *Client) sendData(data []byte) {
-	cmd := fmt.Sprintf("%x\r\n", len(data))
-	_, err := c.conn.Write([]byte(cmd))
-	if err != nil {
-		fmt.Println("sendData.WriteCmd err:", err)
-	}
-	_, err = c.conn.Write(data)
-	if err != nil {
-		fmt.Println("sendData.WriteData err:", err)
-	}
-}
-
-func (c *Client) writeTo(wser io.WriteSeeker) int {
-	// 每次向 服务器 读取数据 都已 buf 度量
-	cmd := fmt.Sprintf("%x\r\n", len(c.buf))
-	_, err := c.conn.Write([]byte(cmd))
-	if err != nil {
-		fmt.Println("recvData.WriteCmd err:", err)
-		return -1
-	}
-
-	line := c.readLine()
-	if line == "" {
-		return -1
-	}
-
-	size, err := strconv.ParseInt(line, 16, 0)
-	if err != nil {
-		fmt.Println("data.ParseUint:", line, err)
-		return -1
-	}
-
-	// 服务器 文件 EOF
-	if size == 0 {
-		return 0
-	}
-
-	cps, errCopy := io.CopyBuffer(wser, io.LimitReader(c.reader, size), c.buf)
-	if errCopy != nil {
-		fmt.Println("CopyBuffer:", errCopy)
-		return -1
-	}
-	if cps < size {
-		fmt.Println("cps < size", cps, size)
-		return -1
-	}
-
-	return int(cps)
-}
-
-func (c *Client) endData() int64 {
-	_, err := c.conn.Write([]byte("0\r\n"))
-	if err != nil {
-		fmt.Println("endData.Write err:", err)
-	}
-	cmd := c.readLine()
-	if cmd == "" {
-		return -1
-	}
-
-	code, msg := parseCmd(cmd)
-	if code != 0 {
-		fmt.Printf("endData err:code-%d,msg-%s\r\n", code, msg)
-		return -1
-	}
-	s, _ := strconv.ParseInt(msg, 10, 0)
-	return s
-}
-
-// Close thar close the conn
-func (c *Client) Close() {
-	c.conn.Write([]byte("QUIT\r\n"))
-	cmd := c.readLine()
-	fmt.Println(cmd)
-	c.conn.Close()
-}
-func SubmmitCsr() {
+// SubmmitCsr 输入名字IP签发证书
+func (c *Client) SubmmitCsr(name string, IP []net.IP) {
 	PrivKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		panic(err)
@@ -239,14 +138,23 @@ func SubmmitCsr() {
 			Locality:           []string{"Beijing"},
 			Organization:       []string{"GKD"},
 			OrganizationalUnit: []string{"GKD"},
-			CommonName:         "Target Entity",
+			CommonName:         name,
 		},
-		PublicKey: PrivKey.PublicKey,
+		IPAddresses: IP,
+		PublicKey:   PrivKey.PublicKey,
 	}
 	//创建请求
-	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &csrTemplate, PrivKey)
+	csrByte, err := x509.CreateCertificateRequest(rand.Reader, &csrTemplate, PrivKey)
+	//创建PEM块
+	csrPEM := new(bytes.Buffer)
+	pem.Encode(csrPEM, &pem.Block{
+		Type:  "CERTIFICATE REQUEST",
+		Bytes: csrByte,
+	})
+
+	println(csrTemplate.Subject.CommonName)
 	if err != nil {
 		panic(err)
 	}
-	tools.SignCsr(csrBytes, *PrivKey)
+
 }

@@ -1,113 +1,127 @@
-package Server
+package main
 
 import (
+	"context"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
-	"errors"
 	"fmt"
+	"github.com/Security_File_-Transfers/tools"
 	"net"
-	"os"
-	"time"
 )
 
-// 日志 接口
-type logger interface {
-	Debug(v ...interface{})
-	Error(v ...interface{})
-}
+const FilePath = "./File"
 
-// 配置 接口
-type configer interface {
-	QueryPutPath(authArg string) (string, error)
-	QueryGetPath(authArg string, pathID string) (string, error)
-}
+var goID int = 0 //线程ID
 
-// ErrNotPathID 是QueryGetPath的特指
-var ErrNotPathID = errors.New("cpf: not pathID")
-
-// Server is a cpf server
+// Server 服务器对象
 type Server struct {
 	// 欢迎 语句
-	Welcome  string
-	listener net.Listener
-	cfg      configer
-	log      logger
-
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	IdleTimeout  time.Duration
-	auth         func(string) bool
+	listener      net.Listener
+	buffer        []tools.DataPacket            //文件包
+	activeDaemons map[string]context.CancelFunc //守护进程线程池
 	// CA 证书和私钥
 	caCert *x509.Certificate
 	caKey  *rsa.PrivateKey
 }
 
 // NewServer 创建新的server并且握手
-func NewServer(cfg configer, log logger) *Server {
-	s := &Server{
-		Welcome: "Welcome to cpf",
-
-		ReadTimeout:  time.Minute,
-		WriteTimeout: time.Minute,
-		IdleTimeout:  time.Minute * 5,
-		//获取CA证书等
-		caCert: loadCACertificate(),
-		caKey:  loadCAPrivateKey(),
+func main() {
+	server := new(Server)
+	err := server.Start("localhost:8080")
+	if err != nil {
+		fmt.Println("Error starting server:", err)
 	}
-
-	if cfg == nil {
-		s.cfg = def
-	} else {
-		s.cfg = cfg
-	}
-
-	if log == nil {
-		s.log = def
-	} else {
-		s.log = log
-	}
-
-	return s
 }
 
-func loadCACertificate() *x509.Certificate {
-	certPEM, err := os.ReadFile("./CA/CA.crt")
+func (s *Server) Start(address string) error {
+	var err error
+	s.listener, err = net.Listen("tcp", address)
 	if err != nil {
-		return nil
+		return err
 	}
+	defer s.listener.Close()
 
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		fmt.Errorf("failed to decode PEM block containing the CAcertificate")
-		return nil
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection:", err)
+			continue
+		}
+
+		go s.handleConnection(conn) //处理连接
 	}
-
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil
-	}
-
-	return cert
 }
 
-func loadCAPrivateKey() *rsa.PrivateKey {
-	keyPEM, err := os.ReadFile("./CA/CA.key")
-	if err != nil {
-		fmt.Errorf("No have the CAprivate key")
-		return nil
-	}
+func (s *Server) handleDataPacket(conn net.Conn, packet *tools.DataPacket) {
+	switch packet.Flag {
+	case tools.RequestCert:
+		// 从 DataPacket 的 Content 字段中解析 CSR PEM
+		csrBlock, _ := pem.Decode(packet.Content[:])
+		if csrBlock == nil {
+			fmt.Println("Error decoding CSR PEM block")
+			return
+		}
 
-	block, _ := pem.Decode(keyPEM)
-	if block == nil {
-		fmt.Errorf("failed to decode PEM block containing the CAprivate key")
-		return nil
-	}
+		// 解析 CSR 数据
+		csr, err := x509.ParseCertificateRequest(csrBlock.Bytes)
+		if err != nil {
+			fmt.Println("Error parsing CSR:", err)
+			return
+		}
 
-	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		return nil
-	}
+		// 验证 CSR
+		err = csr.CheckSignature()
+		if err != nil {
+			fmt.Println("Error checking CSR signature:", err)
+			return
+		}
 
-	return key
+		// 处理 CSR，签发证书等
+		// ...
+
+	default:
+		fmt.Println("Unsupported flag:", packet.Flag)
+	}
+}
+
+func (s *Server) handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// ... 发送欢迎消息等 ...
+
+	//reader := bufio.NewReader(conn)
+}
+
+func (s *Server) handleLongConnection(conn net.Conn) {
+	// 为每个长连接创建一个唯一的ID
+	connID := string(goID)
+	goID++
+	// 创建一个Context，用于控制守护进程的生命周期
+	ctx, cancel := context.WithCancel(context.Background())
+	s.activeDaemons[connID] = cancel
+
+	// 创建守护进程goroutine来处理长连接
+	go func() {
+		defer func() {
+			// 当守护进程结束时，清理资源
+			conn.Close()
+			delete(s.activeDaemons, connID)
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				// 当 context 被取消时，结束守护进程
+				return
+			default:
+				// 在这里处理长连接的业务逻辑
+				// ...
+			}
+		}
+	}()
+}
+func (s *Server) StopLongConnection(connID string) {
+	if cancel, ok := s.activeDaemons[connID]; ok {
+		cancel()
+	}
 }

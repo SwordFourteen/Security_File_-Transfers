@@ -69,40 +69,84 @@ func init() {
 	}
 }
 
-// 对证书进行签名
-func SignCsr(csr x, key rsa.PrivateKey) (crt []byte) {
+// SignCsr  对CSR进行签名返回证书，传PEM块
+func SignCsr(csr []byte) (crt []byte) {
 	// 读取CA的证书私钥
-	CAcert, _ := loadCACertificate()
-	CAPriv, _ := loadCAPrivateKey()
-	certBytes, err := x509.CreateCertificate(rand.Reader, &cert, CAcert, key, CAPriv)
-	if err != nil {
-		return err
+	CAcert := loadCACertificate()
+	CAPriv := loadCAPrivateKey()
+	// 解码传入的CSR
+	csrBlock, _ := pem.Decode(csr)
+	if csrBlock == nil || csrBlock.Type != "CERTIFICATE REQUEST" {
+		return nil
 	}
+
+	// 解析传入的CSR
+	csrParsed, err := x509.ParseCertificateRequest(csrBlock.Bytes)
+	if err != nil {
+		panic(err)
+		return nil
+
+	}
+	// 创建证书模板
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),                                                              //为证书分配一个序列号
+		Subject:               csrParsed.Subject,                                                          //主题
+		NotBefore:             time.Now(),                                                                 //生效时间
+		NotAfter:              time.Now().AddDate(1, 0, 0),                                                // 设置证书有效期，例如1年
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,               //设置用途可以数字签名和封装
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, //设置证书的验证
+		BasicConstraintsValid: false,                                                                      //它可不可以签发证书
+	}
+
+	// 使用CA证书和私钥签署证书
+	certBytes, err := x509.CreateCertificate(rand.Reader, template, CAcert, csrParsed.PublicKey, CAPriv)
+	if err != nil {
+		panic(err)
+		return nil
+	}
+	// 将生成的证书编码为PEM格式
+	certPem := &pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: certBytes,
+	}
+	// 转换成证书的Byte格式
+	crt = pem.EncodeToMemory(certPem)
+	return crt
 }
+
+// VerifyCrt 检测证书正确性传PEM块
 func VerifyCrt(CertData []byte) bool {
-	/*
-		// 解码 PEM 编码的证书数据
-		block, _ := pem.Decode(CertData)
-		if block == nil {
-			panic("failed to decode server certificate")
-		}
+	// 加载CA证书，这里需要确保CA证书已经存在
+	caCert := loadCACertificate()
+	// 创建证书池并添加CA证书
+	certPool := x509.NewCertPool()
+	certPool.AddCert(caCert)
 
-		// 解析证书数据
-		serverCert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			panic(err)
-		}
+	// 解析证书数据
+	block, _ := pem.Decode(CertData)
+	if block == nil || block.Type != "CERTIFICATE" {
+		panic("证书块获取失败")
+		return false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		fmt.Println("Error parsing certificate:", err)
+		return false
+	}
+	// 验证证书签名和有效期
+	opts := x509.VerifyOptions{
+		Roots:       certPool,
+		CurrentTime: time.Now(),
+	}
 
-		// 验证证书
-		_, err = serverCert.Verify(x509.VerifyOptions{
-			//Roots: caCertPool,
-		})
-		if err != nil {
-			panic(err)
-		}
-	*/
+	if _, err := cert.Verify(opts); err != nil {
+		fmt.Println("证书验证失败:", err)
+		return false
+	}
+
 	return true
 }
+
 func loadCACertificate() *x509.Certificate {
 	certPEM, err := os.ReadFile("./CA/CA.crt")
 	if err != nil {
