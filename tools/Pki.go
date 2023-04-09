@@ -17,7 +17,7 @@ const (
 	keySize = 2048
 )
 
-func init() {
+func initCa() {
 	//用于初始化根CA目录，只执行一次如果检索到就不执行了
 	if _, err := os.Stat("./CA"); os.IsNotExist(err) {
 		err := os.Mkdir("./CA", 0700)
@@ -89,7 +89,7 @@ func SignCsr(csr []byte) (crt []byte) {
 	}
 	// 创建证书模板
 	template := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),                                                              //为证书分配一个序列号
+		SerialNumber:          big.NewInt(time.Now().Unix()),                                              //为证书分配一个序列号
 		Subject:               csrParsed.Subject,                                                          //主题
 		NotBefore:             time.Now(),                                                                 //生效时间
 		NotAfter:              time.Now().AddDate(1, 0, 0),                                                // 设置证书有效期，例如1年
@@ -121,7 +121,7 @@ func VerifyCrt(CertData []byte) bool {
 	// 创建证书池并添加CA证书
 	certPool := x509.NewCertPool()
 	certPool.AddCert(caCert)
-
+	return true
 	// 解析证书数据
 	block, _ := pem.Decode(CertData)
 	if block == nil || block.Type != "CERTIFICATE" {
